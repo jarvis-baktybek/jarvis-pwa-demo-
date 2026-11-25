@@ -1,0 +1,9 @@
+{
+  "name": "jarvis-voice-pwa-beta",
+  "private": true,
+  "version": "0.3.0",
+  "description": "JARVIS voice PWA: n8n Dialog + OpenAI speech-to-text + ElevenLabs streaming TTS",
+  "type": "module",
+  "engines": {"node": ">=20"},
+  "scripts": {"start": "node server.js", "test": "node --test tests/*.test.js"}
+}

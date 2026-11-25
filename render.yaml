@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: jarvis-pwa-voice-demo
+    runtime: node
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: JARVIS_ACCESS_CODE
+        sync: false
+      - key: N8N_DIALOG_URL
+        sync: false
+      - key: N8N_AUTH_HEADER_NAME
+        sync: false
+      - key: N8N_AUTH_HEADER_VALUE
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: ELEVENLABS_MODEL_ID
+        value: eleven_v4
+      - key: OPENAI_STT_MODEL
+        value: gpt-4o-mini-transcribe
+      - key: JARVIS_TENANT_ID
+        value: jarvis-demo
+      - key: DEMO_MODE
+        value: 'false'

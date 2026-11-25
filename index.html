@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
+  <meta name="theme-color" content="#050d1d" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="JARVIS" />
+  <meta name="description" content="JARVIS — персональный голосовой помощник для CRM." />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./assets/icon-192.png" type="image/png" />
+  <link rel="apple-touch-icon" href="./assets/icon-180.png" />
+  <link rel="stylesheet" href="./style.css" />
+  <title>JARVIS — Voice Interface 2.0</title>
+</head>
+<body>
+  <main class="app" id="app" data-state="idle">
+    <div class="ambient ambient-left" aria-hidden="true"></div>
+    <div class="ambient ambient-right" aria-hidden="true"></div>
+    <div class="horizon horizon-one" aria-hidden="true"></div>
+    <div class="horizon horizon-two" aria-hidden="true"></div>
+    <div class="grain" aria-hidden="true"></div>
+
+    <header class="header">
+      <div class="symbol" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      <h1>JARVIS</h1>
+      <p>VOICE ASSISTANT</p>
+    </header>
+
+    <section class="experience" aria-label="Интерактивная визуализация JARVIS">
+      <div class="orb-composition" id="composition">
+        <div class="halo halo-a" aria-hidden="true"></div>
+        <div class="halo halo-b" aria-hidden="true"></div>
+        <canvas id="orb-canvas" width="600" height="600" aria-hidden="true"></canvas>
+        <button type="button" id="orb-control" class="orb-control" aria-label="Начать голосовой разговор" aria-describedby="gesture-help"></button>
+      </div>
+      <div class="equalizer" id="equalizer" aria-hidden="true">
+        <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <div class="state-copy" aria-live="polite" aria-atomic="true">
+        <div class="state-title" id="state-title">Нажмите на сферу</div>
+        <div class="state-detail" id="state-detail">Чтобы начать разговор</div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <p id="gesture-help">Касание — управление · Удержание — завершить</p>
+      <span>JARVIS · PRIVATE VOICE INTERFACE</span>
+    </footer>
+    <div id="live-announcement" class="sr-only" aria-live="polite"></div>
+  </main>
+  <div class="access-overlay" id="access-overlay" hidden>
+    <form class="access-box" id="access-form" autocomplete="off">
+      <div class="access-crest">JARVIS</div>
+      <label for="access-code">Код доступа к Вашему JARVIS</label>
+      <input id="access-code" type="password" autocomplete="current-password" minlength="12" required placeholder="Введите код доступа" />
+      <button type="submit">Разблокировать</button>
+      <p id="access-error" role="status"></p>
+      <small>Ключи OpenAI, ElevenLabs и Битрикс24 хранятся только на сервере.</small>
+    </form>
+  </div>
+  <audio id="jarvis-audio" playsinline preload="none" aria-hidden="true"></audio>
+  <script src="./app.js" defer></script>
+  <script src="./voice.js" defer></script>
+</body>
+</html>
