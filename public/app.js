@@ -25,7 +25,7 @@
   let audioLevel = 0, smoothLevel = 0, peak = 0;
   let heardSpeech = false, speechBegan = 0, silenceSince = 0;
   let raf = 0, lastRenderAt = 0, dpr = 1;
-  let pointerHeldTimer = null, wasLongPress = false;
+  let pointerHeldTimer = null, wasLongPress = false, pointerHandled = false;
   let lastUpdateMs = performance.now();
 
   function rescale() {
@@ -41,7 +41,7 @@
     idle: ['Нажмите на сферу', 'Чтобы начать разговор'],
     listening: ['Слушаю Вас', 'Говорите свободно · после паузы отвечу'],
     thinking: ['Обрабатываю запрос', 'Получаю ответ'],
-    speaking: ['Джарвис отвечает', 'Можете перебить голосом или касанием']
+    speaking: ['Джарвис отвечает', 'Коснитесь сферы, чтобы остановить']
   };
 
   function setState(next) {
@@ -120,6 +120,9 @@
   function onPointerDown(event) {
     if (event.button !== undefined && event.button !== 0) return;
     wasLongPress = false;
+    pointerHandled = state === 'speaking' || state === 'thinking';
+    // Stop playback immediately on touch-down. Waiting for touch-up feels unresponsive.
+    if (pointerHandled) onTap();
     window.clearTimeout(pointerHeldTimer);
     pointerHeldTimer = window.setTimeout(() => {
       wasLongPress = true;
@@ -130,7 +133,8 @@
   function onPointerUp() {
     window.clearTimeout(pointerHeldTimer);
     pointerHeldTimer = null;
-    if (!wasLongPress) onTap();
+    if (!wasLongPress && !pointerHandled) onTap();
+    pointerHandled = false;
   }
   button.addEventListener('pointerdown', onPointerDown);
   button.addEventListener('pointerup', onPointerUp);

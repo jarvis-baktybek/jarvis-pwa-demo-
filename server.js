@@ -151,7 +151,7 @@ async function handle(req,res){
    const data=await callN8n({mode,device_id:'my-iphone',session_id:sid,text:message});
    let ticket=null;
    if(!demo && typeof data.speak==='string'&&data.speak.trim() && voiceConfigured){
-     ticket=token(); tickets.set(ticket,{text:data.speak.trim().slice(0,1800),sid:auth.id,expires:now()+60_000});
+     ticket=token(); tickets.set(ticket,{text:data.speak.trim().slice(0,1800),language:['ru','ky','en'].includes(data.language)?data.language:'ru',sid:auth.id,expires:now()+60_000});
    }
    // Do NOT expose any CRM payload, account identifiers or spoken transcript in response.
    return send(res,200,{ok:true,speech_ticket:ticket,end_session:data.end_session===true,requires_confirmation:data.requires_confirmation===true,has_speech:typeof data.speak==='string'&&!!data.speak.trim(),demo});
@@ -165,7 +165,7 @@ async function handle(req,res){
    const model=env.ELEVENLABS_MODEL_ID||'eleven_v4';
    const upstream=await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}/stream?output_format=mp3_44100_128`,{
       method:'POST',headers:{'xi-api-key':env.ELEVENLABS_API_KEY,'Content-Type':'application/json'},
-      body:JSON.stringify({text:t.text,model_id:model,language_code:'ru',apply_text_normalization:'on',voice_settings:{stability:.5,similarity_boost:.8}}),
+      body:JSON.stringify({text:t.text,model_id:model,language_code:t.language||'ru',apply_text_normalization:'on',voice_settings:{stability:.5,similarity_boost:.8}}),
       signal:AbortSignal.timeout(60_000)
    });
    if(!upstream.ok || !upstream.body)throw new Error(`elevenlabs_http_${upstream.status}`);

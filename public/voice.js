@@ -17,7 +17,7 @@
   const MIN_VOICE_MS = 390;
   const MAX_UTTERANCE_MS = 16_000;
   const VOICE_THRESHOLD = .115;
-  const INTERRUPT_THRESHOLD = .34;
+  const INTERRUPT_THRESHOLD = .25;
   let authorized = false;
   let demo = false;
   let phase = 'idle';
@@ -166,7 +166,7 @@
   async function playTicket(ticket){
     stopAudio();pendingAudioId=ticket;
     audio.src='/api/speech/'+encodeURIComponent(ticket);
-    set('speaking','Джарвис отвечает · можно перебить');
+    set('speaking','Коснитесь сферы, чтобы остановить ответ');
     try{await audio.play();playingBlocked=false;}
     catch{
       playingBlocked=true;
@@ -195,9 +195,8 @@
       set('listening','Слушаю Вас');startRecorder();return;
     }
     if(phase==='speaking'){
-      if(playingBlocked){
-        try{await audio.play();playingBlocked=false;UI.setDetail('Джарвис отвечает');}catch{UI.setDetail('Разрешите воспроизведение звука в Safari');}
-      }else interrupt();
+      // Touch is a guaranteed stop command; do not interpret it as 'play' when Safari blocks audio.
+      interrupt();
     }
   }
   async function end(){
@@ -222,7 +221,7 @@
       // Conservative heuristic. Echo cancellation on Safari is not perfectly reliable.
       if(level>INTERRUPT_THRESHOLD){
         if(!bargeSince)bargeSince=ts;
-        if(ts-bargeSince>360)interrupt();
+        if(ts-bargeSince>260)interrupt();
       }else bargeSince=0;
     }
   }
