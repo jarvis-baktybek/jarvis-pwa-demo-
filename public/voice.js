@@ -139,13 +139,13 @@
     const blob=await stopRecorder();
     if(turn!==turnCounter||phase!=='thinking')return;
     if(!blob||blob.size<1200||!spoke){
-      set('listening','Не расслышала. Попробуйте ещё раз');startRecorder();return;
+      set('listening','Не расслышал. Повторите, пожалуйста.');startRecorder();return;
     }
     controller=new AbortController();
     try{
       const textData=await request('/api/transcribe',{method:'POST',headers:{'Content-Type':blob.type||'audio/mp4'},body:blob,signal:controller.signal});
       if(turn!==turnCounter)return;
-      if(!textData.text?.trim()) {set('listening','Не расслышала. Повторите.');startRecorder();return;}
+      if(!textData.text?.trim()) {set('listening','Не расслышал. Повторите, пожалуйста.');startRecorder();return;}
       UI.setDetail('Джарвис обрабатывает запрос');
       if(!(await initPromise))throw new Error('n8n_session_not_started');
       const d=await request('/api/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'ask',session_id:sessionId,text:textData.text}),signal:controller.signal});
