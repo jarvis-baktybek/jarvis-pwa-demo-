@@ -9,7 +9,6 @@ import {createServer} from 'node:http';
 import {readFileSync, existsSync, createReadStream, statSync} from 'node:fs';
 import {resolve, extname, sep} from 'node:path';
 import {randomBytes, timingSafeEqual} from 'node:crypto';
-import {Readable} from 'node:stream';
 
 const root = resolve(process.cwd(), 'public');
 const envPath = resolve(process.cwd(), '.env');
@@ -201,27 +200,55 @@ async function handle(req,res){
    const spokenText=mode==='start'?'Джарвис на связи.':data.speak;
    let ticket=null;
    if(!demo && typeof spokenText==='string'&&spokenText.trim() && voiceConfigured){
-     ticket=token(); tickets.set(ticket,{text:spokenText.trim().slice(0,1800),language:mode==='start'?'ru':(['ru','ky','en'].includes(data.language)?data.language:'ru'),sid:auth.id,expires:now()+60_000});
+     ticket=token(); tickets.set(ticket,{text:spokenText.trim().slice(0,1800),language:mode==='start'?'ru':(['ru','ky','en'].includes(data.language)?data.language:'ru'),sid:auth.id,expires:now()+3*60_000,audioPromise:null});
    }
    // Do NOT expose any CRM payload, account identifiers or spoken transcript in response.
    return send(res,200,{ok:true,speech_ticket:ticket,end_session:data.end_session===true,requires_confirmation:data.requires_confirmation===true,has_speech:typeof data.speak==='string'&&!!data.speak.trim(),demo});
  }
- if(req.method==='GET'&&path.startsWith('/api/speech/')){
+ if((req.method==='GET'||req.method==='HEAD')&&path.startsWith('/api/speech/')){
    const id=path.slice('/api/speech/'.length);
-   const t=tickets.get(id); tickets.delete(id);
+   // Safari may ask for the same media URL multiple times (Range: bytes=0-,
+   // retries and metadata requests). A ticket MUST NOT be consumed on first GET.
+   const t=tickets.get(id);
    if(!t||t.sid!==auth.id||t.expires<now())return fail(res,404,'ticket_expired');
    if(!voiceConfigured)return fail(res,503,'voice_not_configured');
-   const voice=env.ELEVENLABS_VOICE_ID;
-   const model=env.ELEVENLABS_MODEL_ID||'eleven_v4';
-   const upstream=await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}/stream?output_format=mp3_44100_128`,{
-      method:'POST',headers:{'xi-api-key':env.ELEVENLABS_API_KEY,'Content-Type':'application/json'},
-      body:JSON.stringify({text:t.text,model_id:model,language_code:t.language||'ru',apply_text_normalization:'on',voice_settings:{stability:.5,similarity_boost:.8}}),
-      signal:AbortSignal.timeout(60_000)
-   });
-   if(!upstream.ok || !upstream.body)throw new Error(`elevenlabs_http_${upstream.status}`);
-   res.writeHead(200,{'Content-Type':'audio/mpeg','Cache-Control':'no-store','Accept-Ranges':'none'});
-   Readable.fromWeb(upstream.body).pipe(res);
-   res.on('close',()=>{ if(!res.writableEnded) { try{upstream.body.cancel();}catch{} } });
+   if(!t.audioPromise){
+     t.audioPromise=(async()=>{
+       const voice=env.ELEVENLABS_VOICE_ID;
+       const model=env.ELEVENLABS_MODEL_ID||'eleven_v4';
+       const upstream=await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}/stream?output_format=mp3_44100_128`,{
+         method:'POST',headers:{'xi-api-key':env.ELEVENLABS_API_KEY,'Content-Type':'application/json'},
+         body:JSON.stringify({text:t.text,model_id:model,language_code:t.language||'ru',apply_text_normalization:'on',voice_settings:{stability:.5,similarity_boost:.8}}),
+         signal:AbortSignal.timeout(60_000)
+       });
+       if(!upstream.ok||!upstream.body)throw new Error(`elevenlabs_http_${upstream.status}`);
+       if(Number(upstream.headers.get('content-length')||0)>6_000_000)throw new Error('tts_audio_too_large');
+       const bytes=Buffer.from(await upstream.arrayBuffer());
+       if(!bytes.length||bytes.length>6_000_000)throw new Error('tts_invalid_audio');
+       return bytes;
+     })().catch(err=>{t.audioPromise=null;throw err;});
+   }
+   const bytes=await t.audioPromise;
+   const total=bytes.length;
+   const headers={'Content-Type':'audio/mpeg','Cache-Control':'private, no-store','Accept-Ranges':'bytes','X-Content-Type-Options':'nosniff'};
+   const range=req.headers.range;
+   let start=0,end=total-1,status=200;
+   if(range){
+     const m=/^bytes=(\d*)-(\d*)$/.exec(range.trim());
+     if(!m || (!m[1]&&!m[2])){
+       res.writeHead(416,{...headers,'Content-Range':`bytes */${total}`});res.end();return;
+     }
+     if(!m[1]) {const suffix=Number(m[2]);start=Math.max(0,total-suffix);}
+     else {start=Number(m[1]);if(m[2])end=Math.min(total-1,Number(m[2]));}
+     if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start>=total||start>end){
+       res.writeHead(416,{...headers,'Content-Range':`bytes */${total}`});res.end();return;
+     }
+     status=206;
+     headers['Content-Range']=`bytes ${start}-${end}/${total}`;
+   }
+   headers['Content-Length']=String(end-start+1);
+   res.writeHead(status,headers);
+   if(req.method==='HEAD')res.end();else res.end(bytes.subarray(start,end+1));
    return;
  }
  if(req.method==='GET' && !path.startsWith('/api/'))return staticFile(req,res,path==='/'?'/index.html':path);

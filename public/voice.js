@@ -105,7 +105,7 @@
     playbackWatchdog=setTimeout(()=>{
       if(phase!=='speaking'||pendingAudioId!==ticket||welcomeActive)return;
       // A fulfilled play() does not prove that Safari advanced the media clock.
-      if(audio.paused||audio.currentTime<0.1){
+      if(audio.error||audio.paused||audio.currentTime<0.1){
         showPlaybackFailure('Голос не начал воспроизводиться');
       }
     },4500);
@@ -300,7 +300,7 @@
       if(phase==='speaking' && pendingAudioId===ticket)playingBlocked=false;
     }catch(err){
       if(phase!=='speaking' || pendingAudioId!==ticket)return;
-      showPlaybackFailure('iPhone заблокировал воспроизведение звука');
+      showPlaybackFailure('iPhone не воспроизвёл ответ: '+(err?.name||'ошибка плеера'));
     }
   }
   function retryBlockedReply(){
@@ -332,7 +332,7 @@
   }
   audio.addEventListener('ended',()=>{if(welcomeActive){finishWelcome();return;}if(phase==='speaking')void afterSpeech();});
   audio.addEventListener('error',()=>{if(welcomeActive){finishWelcome();return;}if(phase==='speaking'){
-    showPlaybackFailure('Не удалось загрузить голосовой ответ');
+    showPlaybackFailure('Ошибка загрузки голоса (медиа '+(audio.error?.code||'?')+')');
   }});
   audio.addEventListener('stalled',()=>{
     if(phase==='speaking'&&!welcomeActive&&audio.currentTime<0.1)
