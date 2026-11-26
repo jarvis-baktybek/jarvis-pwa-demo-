@@ -47,6 +47,9 @@
   let playingBlocked = false;
   let endAfterAudio = false;
   let pendingAudioId = '';
+  let playbackWatchdog = null;
+  let micSuspendedForSpeech = false;
+  let resumingMic = false;
   // Welcome is presentation-only: the proven 0.6 microphone/session path stays intact.
   let welcomeActive = false;
   let welcomeTimer = null;
@@ -84,10 +87,64 @@
       try{r.ondataavailable=null;r.onstop=null;r.onerror=null;r.stop();}catch{}
     }
   }
+  function clearPlaybackWatchdog(){
+    if(playbackWatchdog!==null){clearTimeout(playbackWatchdog);playbackWatchdog=null;}
+  }
+  function setAudioSession(type){
+    // Supported on newer Safari releases; browsers without it simply ignore this.
+    try{if(navigator.audioSession && 'type' in navigator.audioSession)navigator.audioSession.type=type;}catch{}
+  }
+  function showPlaybackFailure(message){
+    if(phase!=='speaking'||welcomeActive||!pendingAudioId)return;
+    clearPlaybackWatchdog();
+    playingBlocked=true;
+    UI.setDetail(message+' · коснитесь сферы для повтора');
+  }
+  function watchPlayback(ticket){
+    clearPlaybackWatchdog();
+    playbackWatchdog=setTimeout(()=>{
+      if(phase!=='speaking'||pendingAudioId!==ticket||welcomeActive)return;
+      // A fulfilled play() does not prove that Safari advanced the media clock.
+      if(audio.paused||audio.currentTime<0.1){
+        showPlaybackFailure('Голос не начал воспроизводиться');
+      }
+    },4500);
+  }
+  async function suspendMicForSpeech(){
+    // iOS can direct sound to the quiet receiver while capture is open.
+    // Only switch once the utterance has been fully recorded and transcribed.
+    if(!activeMic)return;
+    micSuspendedForSpeech=true;
+    try{await UI.stopMic();}catch{}
+    activeMic=null;
+  }
+  async function resumeMicAfterSpeech(){
+    if(resumingMic)return;
+    if(!micSuspendedForSpeech){startRecorder();return;}
+    const generation=turnCounter;
+    resumingMic=true;
+    setAudioSession('play-and-record');
+    try{
+      const stream=await UI.startMic();
+      if(generation!==turnCounter||phase!=='listening'){
+        try{await UI.stopMic();}catch{}
+        return;
+      }
+      activeMic=stream;
+      micSuspendedForSpeech=false;
+      startRecorder();
+    }catch(err){
+      if(generation===turnCounter&&phase==='listening'){
+        UI.setDetail('Не удалось снова включить микрофон. Завершите разговор и запустите заново');
+        warn(err);
+      }
+    }finally{resumingMic=false;}
+  }
   function stopAudio(){
     // Keep the SAME media element and its user-gesture activation on iOS.
     // Removing src and calling load() between clips can make a later asynchronous
     // audio.play() behave like a fresh autoplay attempt in installed PWAs.
+    clearPlaybackWatchdog();
     audio.pause();
     playingBlocked=false;
     pendingAudioId='';
@@ -139,6 +196,8 @@
     if(phase!=='idle')return;
     if(!window.isSecureContext){warn(new Error('Нужен HTTPS для микрофона на iPhone'));return;}
     if(!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder){warn(new Error('Браузер не поддерживает запись речи'));return;}
+    setAudioSession('play-and-record');
+    endAfterAudio=false;micSuspendedForSpeech=false;
     sessionId=crypto.randomUUID();turnCounter++;
     const generation=turnCounter;
     set('listening','Разрешите доступ к микрофону');
@@ -215,29 +274,33 @@
         setTimeout(()=>{if(turn===turnCounter)void afterSpeech()},2000);
       }else if(d.speech_ticket){
         pendingAudioId=d.speech_ticket;
+        await suspendMicForSpeech();
+        if(turn!==turnCounter)return;
         await playTicket(d.speech_ticket);
-      }else {set('listening','Ответ без озвучки · попробуйте ещё раз');startRecorder();}
+      }else {set('listening','Ответ без озвучки · попробуйте ещё раз');await resumeMicAfterSpeech();}
     }catch(err){
       if(turn!==turnCounter || err.name==='AbortError')return;
-      warn(err);set('listening','Повторите запрос или проверьте соединение');startRecorder();
+      warn(err);set('listening','Повторите запрос или проверьте соединение');await resumeMicAfterSpeech();
     }
   }
   async function playTicket(ticket){
     // Reuse the audio element that already played the greeting on a real tap.
     // Do not unload/reset it: Safari sometimes treats that as a fresh autoplay.
+    clearPlaybackWatchdog();
     audio.pause();
+    setAudioSession('playback');
     pendingAudioId=ticket;
     playingBlocked=false;
     audio.muted=false;
     audio.src='/api/speech/'+encodeURIComponent(ticket);
     set('speaking','Коснитесь сферы, чтобы остановить ответ');
     try{
+      watchPlayback(ticket);
       await audio.play();
       if(phase==='speaking' && pendingAudioId===ticket)playingBlocked=false;
     }catch(err){
       if(phase!=='speaking' || pendingAudioId!==ticket)return;
-      playingBlocked=true;
-      UI.setDetail('iPhone заблокировал звук. Коснитесь сферы, чтобы услышать ответ');
+      showPlaybackFailure('iPhone заблокировал воспроизведение звука');
     }
   }
   function retryBlockedReply(){
@@ -246,6 +309,8 @@
     const ticket=pendingAudioId;
     playingBlocked=false;
     UI.setDetail('Включаю голосовой ответ');
+    setAudioSession('playback');
+    watchPlayback(ticket);
     try{
       const play=audio.play();
       if(play?.catch)void play.catch(()=>{
@@ -263,17 +328,21 @@
     stopAudio();
     if(endAfterAudio){await end();return;}
     set('listening','Слушаю Вас · говорите свободно');
-    startRecorder();
+    await resumeMicAfterSpeech();
   }
   audio.addEventListener('ended',()=>{if(welcomeActive){finishWelcome();return;}if(phase==='speaking')void afterSpeech();});
   audio.addEventListener('error',()=>{if(welcomeActive){finishWelcome();return;}if(phase==='speaking'){
-    UI.setDetail('Ошибка загрузки голосового ответа. Проверьте соединение');
+    showPlaybackFailure('Не удалось загрузить голосовой ответ');
   }});
+  audio.addEventListener('stalled',()=>{
+    if(phase==='speaking'&&!welcomeActive&&audio.currentTime<0.1)
+      UI.setDetail('Загрузка голоса задерживается. Если звука нет — коснитесь сферы');
+  });
   function interrupt(){
     // We abort playback immediately and start a new utterance.
     stopAudio();turnCounter++;
     set('listening','Слушаю Вас');
-    startRecorder();
+    void resumeMicAfterSpeech();
   }
   async function tap(){
     if(phase==='idle')return start();
@@ -281,7 +350,7 @@
     if(phase==='listening')return submit(true);
     if(phase==='thinking'){
       turnCounter++;controller?.abort();controller=null;
-      set('listening','Слушаю Вас');startRecorder();return;
+      set('listening','Слушаю Вас');void resumeMicAfterSpeech();return;
     }
     if(phase==='speaking'){
       // Normal touch interrupts speech; only a Safari-blocked reply needs a
@@ -294,7 +363,7 @@
     turnCounter++;controller?.abort();controller=null;
     welcomeActive=false;
     if(welcomeTimer!==null){clearTimeout(welcomeTimer);welcomeTimer=null;}
-    stopAudio();disposeRecorder();activeMic=null;
+    stopAudio();disposeRecorder();activeMic=null;micSuspendedForSpeech=false;resumingMic=false;
     voiceSince=lastVoiceAt=voicedMs=recentVoiceMs=lastStrongAt=lastMicAt=peakRms=0;
     set('idle');
     try{await UI.stopMic();}catch{}
