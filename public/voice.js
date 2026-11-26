@@ -24,7 +24,7 @@
   const ONSET_GAP_MS = 230;
   const MANUAL_VOICE_MS = 110;
 
-  // Tap Start 0.7.3: explicit gesture starts speech, not page load.
+  // Tap+Mic 0.7.4: explicit gesture starts speech, not page load.
   // iPhone blocks unprompted autoplay, so never try to play on launch.
   let authorized = false;
   let demo = false;
@@ -51,6 +51,7 @@
   let pendingAudioId = '';
   let greetingActive = false;
   let microphoneStarting = false;
+  let tappedMicPromise = null; // Request microphone during the trusted user tap, never after awaited greeting
   let blockedWelcomeNeedsTap = false;
   let cachedWelcomeAttempt = false;
   let greetingFallbackPending = false;
@@ -137,9 +138,9 @@
     message=dict[message]||message.replace(/(Bearer|sk-)[a-zA-Z0-9_-]+/g,'[hidden]');
     UI.onError(message.slice(0,140));
   }
-  // Tap Start 0.7.3: no microphone access, recording or "Слушаю" state
-  // until the greeting has finished. A blocked iOS autoplay stays idle rather
-  // than silently opening the microphone and pretending the voice played.
+  // Permission is requested on the trusted tap (old 0.6 behavior), while
+  // MediaRecorder and the "Слушаю" state wait until the greeting finishes.
+  // If greeting playback is blocked, never pretend we are listening.
   async function openMicAfterGreeting(){
     if(phase!=='speaking' || microphoneStarting)return;
     const generation=turnCounter;
@@ -148,7 +149,9 @@
     set('thinking','Включаю микрофон');
     UI.setTitle?.('Подключаю микрофон');
     try{
-      activeMic=await UI.startMic();
+      const micPromise=tappedMicPromise || UI.startMic();
+      tappedMicPromise=null;
+      activeMic=await micPromise;
       if(generation!==turnCounter || phase!=='thinking'){
         await UI.stopMic();activeMic=null;return;
       }
@@ -181,9 +184,12 @@
     endAfterAudio=false;
     greetingActive=true;
     blockedWelcomeNeedsTap=false;
-    // A manual tap launches the fixed, pre-generated ElevenLabs greeting first.
+    // Display the greeting first. Acquire permission within the direct user gesture
+    // (as in Noise Guard 0.6), but do NOT start MediaRecorder until after it plays.
     set('speaking','Джарвис на связи');
     UI.setTitle?.('Джарвис на связи');
+    tappedMicPromise=UI.startMic();
+    void tappedMicPromise.catch(()=>{});
     // Initialize n8n concurrently with the greeting, not before playback.
     // submit() awaits this same promise, so the first CRM question still has a
     // fully initialized session. Mark rejection handled until submit awaits it.
@@ -211,6 +217,8 @@
           blockedWelcomeNeedsTap=true;
           greetingActive=false;
           set('idle','Не удалось включить приветствие · коснитесь сферы ещё раз');
+          tappedMicPromise=null;
+          void UI.stopMic().catch(()=>{});
           return;
         }
         // Offline, old server, or unsupported response: use the previous
@@ -285,6 +293,8 @@
         blockedWelcomeNeedsTap=true;
         // Keep the media URL: a direct tap may be able to play the buffered welcome.
         set('idle','Не удалось включить звук · коснитесь сферы ещё раз');
+        tappedMicPromise=null;
+        void UI.stopMic().catch(()=>{});
       }else UI.setDetail('Коснитесь сферы, чтобы включить звук');
       return false;
     }
@@ -306,6 +316,8 @@
       greetingActive=false;
       stopAudio();
       set('idle','Не удалось воспроизвести приветствие · коснитесь сферы');
+      tappedMicPromise=null;
+      void UI.stopMic().catch(()=>{});
     }else UI.setDetail('Не удалось воспроизвести голос. Коснитесь сферы для повтора');
   });
   function interrupt(){
@@ -327,6 +339,9 @@
       greetingActive=true;
       set('speaking','Джарвис на связи');
       UI.setTitle?.('Джарвис на связи');
+      // Retrying the greeting is also a direct touch, so request the mic here.
+      tappedMicPromise=UI.startMic();
+      void tappedMicPromise.catch(()=>{});
       try{
         await audio.play();
         playingBlocked=false;
@@ -336,6 +351,8 @@
         greetingActive=false;
         blockedWelcomeNeedsTap=true;
         set('idle','Не удалось воспроизвести приветствие · проверьте звук');
+        tappedMicPromise=null;
+        void UI.stopMic().catch(()=>{});
       }
       return;
     }
@@ -354,7 +371,7 @@
   async function end(reason='manual'){
     turnCounter++;controller?.abort();controller=null;
     greetingActive=false;blockedWelcomeNeedsTap=false;
-    stopAudio();disposeRecorder();activeMic=null;endAfterAudio=false;
+    stopAudio();disposeRecorder();activeMic=null;tappedMicPromise=null;endAfterAudio=false;
     voiceSince=lastVoiceAt=voicedMs=recentVoiceMs=lastStrongAt=lastMicAt=peakRms=0;
     set('idle');
     try{await UI.stopMic();}catch{}
