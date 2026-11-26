@@ -85,9 +85,10 @@
     }
   }
   function stopAudio(){
+    // Keep the SAME media element and its user-gesture activation on iOS.
+    // Removing src and calling load() between clips can make a later asynchronous
+    // audio.play() behave like a fresh autoplay attempt in installed PWAs.
     audio.pause();
-    audio.removeAttribute('src');
-    audio.load();
     playingBlocked=false;
     pendingAudioId='';
   }
@@ -151,6 +152,7 @@
     if(!demo){
       welcomeActive=true;
       set('speaking','Джарвис на связи');
+      audio.muted=false;
       audio.src='/api/welcome-audio';
       welcomeTimer=setTimeout(()=>{if(generation===turnCounter)finishWelcome()},6500);
       try{
@@ -221,13 +223,40 @@
     }
   }
   async function playTicket(ticket){
-    stopAudio();pendingAudioId=ticket;
+    // Reuse the audio element that already played the greeting on a real tap.
+    // Do not unload/reset it: Safari sometimes treats that as a fresh autoplay.
+    audio.pause();
+    pendingAudioId=ticket;
+    playingBlocked=false;
+    audio.muted=false;
     audio.src='/api/speech/'+encodeURIComponent(ticket);
     set('speaking','Коснитесь сферы, чтобы остановить ответ');
-    try{await audio.play();playingBlocked=false;}
-    catch{
+    try{
+      await audio.play();
+      if(phase==='speaking' && pendingAudioId===ticket)playingBlocked=false;
+    }catch(err){
+      if(phase!=='speaking' || pendingAudioId!==ticket)return;
       playingBlocked=true;
-      UI.setDetail('Коснитесь сферы, чтобы включить звук');
+      UI.setDetail('iPhone заблокировал звук. Коснитесь сферы, чтобы услышать ответ');
+    }
+  }
+  function retryBlockedReply(){
+    // Must be invoked SYNCHRONOUSLY from the user's touch/pointer event.
+    if(phase!=='speaking' || !playingBlocked || !pendingAudioId)return;
+    const ticket=pendingAudioId;
+    playingBlocked=false;
+    UI.setDetail('Включаю голосовой ответ');
+    try{
+      const play=audio.play();
+      if(play?.catch)void play.catch(()=>{
+        if(phase==='speaking' && pendingAudioId===ticket){
+          playingBlocked=true;
+          UI.setDetail('Не удалось включить голос. Проверьте звук iPhone и коснитесь ещё раз');
+        }
+      });
+    }catch{
+      playingBlocked=true;
+      UI.setDetail('Не удалось включить голос. Проверьте звук iPhone и коснитесь ещё раз');
     }
   }
   async function afterSpeech(){
@@ -237,7 +266,9 @@
     startRecorder();
   }
   audio.addEventListener('ended',()=>{if(welcomeActive){finishWelcome();return;}if(phase==='speaking')void afterSpeech();});
-  audio.addEventListener('error',()=>{if(welcomeActive){finishWelcome();return;}if(phase==='speaking' && !playingBlocked){UI.setDetail('Не удалось воспроизвести голос. Коснитесь сферы для повтора');}});
+  audio.addEventListener('error',()=>{if(welcomeActive){finishWelcome();return;}if(phase==='speaking'){
+    UI.setDetail('Ошибка загрузки голосового ответа. Проверьте соединение');
+  }});
   function interrupt(){
     // We abort playback immediately and start a new utterance.
     stopAudio();turnCounter++;
@@ -253,7 +284,9 @@
       set('listening','Слушаю Вас');startRecorder();return;
     }
     if(phase==='speaking'){
-      // Touch is a guaranteed stop command; do not interpret it as 'play' when Safari blocks audio.
+      // Normal touch interrupts speech; only a Safari-blocked reply needs a
+      // deliberate one-tap playback retry, otherwise the user hears nothing.
+      if(playingBlocked){retryBlockedReply();return;}
       interrupt();
     }
   }
