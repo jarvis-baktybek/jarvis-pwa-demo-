@@ -13,11 +13,17 @@
   const audio = document.getElementById('jarvis-audio');
   if (!UI || !audio) return;
 
-  const WAIT_SILENCE_MS = 810;
-  const MIN_VOICE_MS = 390;
+  // Speech gate 0.6: use real voiced audio time, not 'time since first loud sample'.
+  // These conservative defaults can be tuned after testing on a specific phone.
+  const WAIT_SILENCE_MS = 1050;
+  const MIN_VOICE_MS = 240;
   const MAX_UTTERANCE_MS = 16_000;
-  const VOICE_THRESHOLD = .115;
-  const INTERRUPT_THRESHOLD = .25;
+  const MIN_VOICE_RMS = .026;
+  const NOISE_MULTIPLIER = 2.15;
+  const NOISE_MARGIN = .005;
+  const ONSET_GAP_MS = 230;
+  const MANUAL_VOICE_MS = 110;
+
   let authorized = false;
   let demo = false;
   let phase = 'idle';
@@ -28,7 +34,13 @@
   let chunks = [];
   let voiceSince = 0;
   let lastVoiceAt = 0;
-  let bargeSince = 0;
+  let noiseFloor = .010;
+  let voicedMs = 0;
+  let recentVoiceMs = 0;
+  let lastStrongAt = 0;
+  let lastMicAt = 0;
+  let peakRms = 0;
+
   let initPromise = Promise.resolve();
   let controller = null;
   let turnCounter = 0;
@@ -86,7 +98,10 @@
     chunks=[];
     recorder.ondataavailable=e=>{if(e.data?.size)chunks.push(e.data);};
     recorder.onerror=()=>{disposeRecorder();set('listening','Ошибка записи. Коснитесь сферы для повтора.');};
-    recorderStarted=performance.now();voiceSince=0;lastVoiceAt=0;
+    recorderStarted=performance.now();
+    voiceSince=0;lastVoiceAt=0;voicedMs=0;recentVoiceMs=0;
+    lastStrongAt=0;lastMicAt=0;peakRms=0;
+
     recorder.start();
   }
   async function stopRecorder(){
@@ -131,9 +146,12 @@
       UI.setDetail('Слушаю Вас · касание сферы — отправить');
     }catch(err){warn(err);await end();}
   }
-  async function submit(){
+  async function submit(manual=false){
     if(phase!=='listening')return;
-    const spoke=!!voiceSince && performance.now()-voiceSince>=MIN_VOICE_MS;
+    // A tap may intentionally submit a very short reply such as 'Да'.
+    // Automatic submission requires a sustained, confirmed voiced region.
+    const spoke=(!!voiceSince && voicedMs>=MIN_VOICE_MS) ||
+      (manual && voicedMs>=MANUAL_VOICE_MS && peakRms>=MIN_VOICE_RMS);
     set('thinking','Распознаю Ваш голос');
     const turn=++turnCounter;
     const blob=await stopRecorder();
@@ -183,13 +201,13 @@
   audio.addEventListener('error',()=>{if(phase==='speaking' && !playingBlocked){UI.setDetail('Не удалось воспроизвести голос. Коснитесь сферы для повтора');}});
   function interrupt(){
     // We abort playback immediately and start a new utterance.
-    stopAudio();bargeSince=0;turnCounter++;
+    stopAudio();turnCounter++;
     set('listening','Слушаю Вас');
     startRecorder();
   }
   async function tap(){
     if(phase==='idle')return start();
-    if(phase==='listening')return submit();
+    if(phase==='listening')return submit(true);
     if(phase==='thinking'){
       turnCounter++;controller?.abort();controller=null;
       set('listening','Слушаю Вас');startRecorder();return;
@@ -202,28 +220,46 @@
   async function end(){
     turnCounter++;controller?.abort();controller=null;
     stopAudio();disposeRecorder();activeMic=null;
-    voiceSince=lastVoiceAt=bargeSince=0;
+    voiceSince=lastVoiceAt=voicedMs=recentVoiceMs=lastStrongAt=lastMicAt=peakRms=0;
     set('idle');
     try{await UI.stopMic();}catch{}
   }
-  function onMicLevel(level,ts){
-    if(phase==='listening' && recorder?.state==='recording'){
-      if(level>VOICE_THRESHOLD){
-        if(!voiceSince)voiceSince=ts;
-        lastVoiceAt=ts;
-      }
-      if(voiceSince && ts-voiceSince>MIN_VOICE_MS && ts-lastVoiceAt>WAIT_SILENCE_MS){
-        void submit();return;
-      }
-      if(voiceSince && ts-voiceSince>MAX_UTTERANCE_MS){void submit();}
+  function onMicLevel(level,ts,meta){
+    // The moving sphere uses 'level'; speech recognition uses actual (band-limited)
+    // microphone RMS, to avoid mistaking tiny clicks for a voice command.
+    if(phase!=='listening' || recorder?.state!=='recording')return;
+    const rms=Number.isFinite(meta?.rms) ? meta.rms : Math.max(0,level/12+.009);
+    if(!Number.isFinite(rms) || rms<0)return;
+    const dt=lastMicAt ? Math.max(0,Math.min(80,ts-lastMicAt)) : 0;
+    lastMicAt=ts;
+    const startGate=Math.max(MIN_VOICE_RMS,noiseFloor*NOISE_MULTIPLIER+NOISE_MARGIN);
+    const keepGate=Math.max(.018,startGate*.69);
+    const active=rms>=(voiceSince?keepGate:startGate);
+    // Track quiet background only. Do not learn the user's voice as the noise floor.
+    if(!voiceSince && rms<startGate*.80){
+      noiseFloor=Math.max(.006,Math.min(.05,noiseFloor*.988+rms*.012));
     }
-    if(phase==='speaking' && !playingBlocked){
-      // Conservative heuristic. Echo cancellation on Safari is not perfectly reliable.
-      if(level>INTERRUPT_THRESHOLD){
-        if(!bargeSince)bargeSince=ts;
-        if(ts-bargeSince>260)interrupt();
-      }else bargeSince=0;
+    if(active){
+      if(ts-lastStrongAt>ONSET_GAP_MS)recentVoiceMs=0;
+      recentVoiceMs+=dt;
+      voicedMs+=dt;
+      peakRms=Math.max(peakRms,rms);
+      lastStrongAt=ts;
+      if(!voiceSince && recentVoiceMs>=MIN_VOICE_MS){
+        voiceSince=ts-recentVoiceMs;
+      }
+      if(voiceSince)lastVoiceAt=ts;
+    }else if(!voiceSince && ts-lastStrongAt>ONSET_GAP_MS){
+      recentVoiceMs=0;
     }
+    if(voiceSince && ts-lastVoiceAt>=WAIT_SILENCE_MS){
+      void submit();
+    }else if(voiceSince && ts-voiceSince>=MAX_UTTERANCE_MS){
+      void submit();
+    }
+    // Intentionally no audio-level interruption while JARVIS speaks: on iPhone,
+    // loud background sounds and the assistant's own speaker cause false barge-ins.
+    // Touching the sphere still stops playback immediately and opens the mic.
   }
   window.jarvisController={tap,end,onMicLevel};
 })();

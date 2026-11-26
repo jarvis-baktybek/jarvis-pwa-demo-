@@ -108,7 +108,13 @@
       analyzer = audioContext.createAnalyser();
       analyzer.fftSize = 1024;
       analyzer.smoothingTimeConstant = .80;
-      source.connect(analyzer);
+      // Band-limit *detection only* to human speech frequencies. The recording
+      // stream remains untouched for OpenAI transcription.
+      const highpass=audioContext.createBiquadFilter();
+      highpass.type='highpass';highpass.frequency.value=165;highpass.Q.value=.707;
+      const lowpass=audioContext.createBiquadFilter();
+      lowpass.type='lowpass';lowpass.frequency.value=3800;lowpass.Q.value=.707;
+      source.connect(highpass);highpass.connect(lowpass);lowpass.connect(analyzer);
       samples = new Uint8Array(analyzer.fftSize);
       if (state === 'listening') detail.textContent = 'Говорите свободно · после паузы отвечу';
       return stream;
@@ -159,7 +165,7 @@
     const level = Math.sqrt(energy / Math.ceil(samples.length / 3));
     // Sensitivity for a lively waveform while suppressing quiet mic noise.
     const envelope = Math.min(1, Math.max(0, level - .009) * 12);
-    if (window.jarvisController?.onMicLevel) window.jarvisController.onMicLevel(envelope, timestamp);
+    if (window.jarvisController?.onMicLevel) window.jarvisController.onMicLevel(envelope, timestamp, {rms:level});
     return envelope;
   }
 
