@@ -53,6 +53,8 @@
   let greetingActive = false;
   let microphoneStarting = false;
   let blockedWelcomeNeedsTap = false;
+  let cachedWelcomeAttempt = false;
+  let greetingFallbackPending = false;
 
   async function request(url,options={}) {
     const r=await fetch(url,{credentials:'same-origin',cache:'no-store',...options});
@@ -188,18 +190,48 @@
     // Show the greeting immediately; the server already speaks this phrase via ElevenLabs.
     set('speaking','Джарвис на связи');
     UI.setTitle?.('Джарвис на связи');
+    // Initialize n8n concurrently with the greeting, not before playback.
+    // submit() awaits this same promise, so the first CRM question still has a
+    // fully initialized session. Mark rejection handled until submit awaits it.
     initPromise=request('/api/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'start',session_id:sessionId,text:''})});
+    void initPromise.catch(()=>{});
     try{
-      const hello=await initPromise;
-      if(generation!==turnCounter || phase!=='speaking' || !greetingActive)return;
-      if(hello?.speech_ticket){
-        await playTicket(hello.speech_ticket,{introduction:true});
-      }else if(hello?.demo){
-        // Demo has no real audio ticket. Move to listening without recording the greeting.
-        await openMicAfterGreeting();
-      }else{
-        greetingActive=false;
-        set('idle','Не удалось получить приветствие · коснитесь сферы');
+      if(demo){
+        await initPromise;
+        if(generation===turnCounter && phase==='speaking')await openMicAfterGreeting();
+        return;
+      }
+      cachedWelcomeAttempt=true;
+      audio.src='/api/welcome-audio?v=0.7.2';
+      // Do not await the remote n8n setup before starting the voice.
+      try{
+        await audio.play();
+        cachedWelcomeAttempt=false;
+        playingBlocked=false;
+      }catch(playError){
+        cachedWelcomeAttempt=false;
+        if(generation!==turnCounter || phase!=='speaking' || !greetingActive)return;
+        if(playError?.name==='NotAllowedError'){
+          // Safari disallows autoplay: one sphere tap will retry the very same sound.
+          playingBlocked=true;
+          blockedWelcomeNeedsTap=true;
+          greetingActive=false;
+          set('idle','iPhone заблокировал автозвук · коснитесь сферы');
+          return;
+        }
+        // Offline, old server, or unsupported response: use the previous
+        // proven ticket path instead of leaving the user without a greeting.
+        // Ignore late media errors from the initial audio URL while switching.
+        greetingFallbackPending=true;
+        try{
+          stopAudio();
+          const hello=await initPromise;
+          if(generation!==turnCounter || phase!=='speaking' || !greetingActive)return;
+          if(hello?.speech_ticket)await playTicket(hello.speech_ticket,{introduction:true});
+          else{greetingActive=false;set('idle','Не удалось получить приветствие · коснитесь сферы');}
+        }finally{
+          greetingFallbackPending=false;
+        }
       }
     }catch(err){
       if(generation!==turnCounter)return;
@@ -273,6 +305,8 @@
   }
   audio.addEventListener('ended',()=>{if(phase==='speaking')void afterSpeech();});
   audio.addEventListener('error',()=>{
+    // Let play() reject first so start() can use its ticket fallback.
+    if(cachedWelcomeAttempt || greetingFallbackPending)return;
     if(phase!=='speaking' || playingBlocked)return;
     if(greetingActive){
       greetingActive=false;

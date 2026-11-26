@@ -73,6 +73,40 @@ async function readBody(req,max=1024*1024){
  return Buffer.concat(chunks);
 }
 async function readJSON(req,max=32*1024){const b=await readBody(req,max);try{return JSON.parse(b.toString('utf8'));}catch{const e=new Error('bad_json');e.code=400;throw e;}}
+// Fixed greeting: synthesize once per Render process and reuse the exact
+// ElevenLabs voice for subsequent launches. Do NOT cache CRM or user speech.
+const WELCOME_TEXT = 'Джарвис на связи.';
+let welcomeAudioPromise = null;
+async function cachedWelcomeAudio() {
+  if (!voiceConfigured) throw new Error('voice_not_configured');
+  if (!welcomeAudioPromise) {
+    welcomeAudioPromise = (async () => {
+      const voice = env.ELEVENLABS_VOICE_ID;
+      const model = env.ELEVENLABS_MODEL_ID || 'eleven_v4';
+      const upstream = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}/stream?output_format=mp3_44100_128`, {
+        method: 'POST',
+        headers: {'xi-api-key': env.ELEVENLABS_API_KEY, 'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          text: WELCOME_TEXT, model_id: model, language_code: 'ru',
+          apply_text_normalization: 'on',
+          voice_settings: {stability: .5, similarity_boost: .8}
+        }),
+        signal: AbortSignal.timeout(30_000)
+      });
+      if (!upstream.ok || !upstream.body) throw new Error(`elevenlabs_http_${upstream.status}`);
+      const length = Number(upstream.headers.get('content-length') || 0);
+      if (length > 1_500_000) throw new Error('welcome_audio_too_large');
+      const audio = Buffer.from(await upstream.arrayBuffer());
+      if (!audio.length || audio.length > 1_500_000) throw new Error('invalid_welcome_audio');
+      return audio;
+    })().catch(err => {
+      // Permit retry after a temporary ElevenLabs outage.
+      welcomeAudioPromise = null;
+      throw err;
+    });
+  }
+  return welcomeAudioPromise;
+}
 function mockDialog(body) {
  if (body.mode === 'start') return {ok:true,speak:'Здравствуйте. Слушаю Вас.',end_session:false,requires_confirmation:false};
  if (/^(?:стоп|пока|выход)$/i.test(body.text||''))return {ok:true,speak:'До связи.',end_session:true,requires_confirmation:false};
@@ -141,6 +175,19 @@ async function handle(req,res){
    const text=await transcribe(buffer,mime);
    return send(res,200,{ok:true,has_speech:text.length>0,text});
  }
+  if(req.method==='GET' && path==='/api/welcome-audio') {
+    // Per-user authorization is enforced above; contents are a fixed greeting,
+    // never a transcript. A short private browser cache makes PWA relaunch fast.
+    const bytes = await cachedWelcomeAudio();
+    res.writeHead(200, {
+      'Content-Type': 'audio/mpeg',
+      'Content-Length': String(bytes.length),
+      'Cache-Control': 'private, max-age=86400',
+      'X-Content-Type-Options': 'nosniff'
+    });
+    res.end(bytes);
+    return;
+  }
  if(req.method==='POST'&&path==='/api/turn'){
    const b=await readJSON(req);
    const mode=b.mode==='start'?'start':'ask';
@@ -189,4 +236,8 @@ const server=createServer((req,res)=>{
   });
 }).on('error',e=>console.error('Server error:',e.message));
 process.on('unhandledRejection',()=>console.error('Unexpected async rejection'));
-server.listen(PORT,'0.0.0.0',()=>console.log(`JARVIS ready: http://localhost:${PORT} (demo=${demo})`));
+server.listen(PORT,'0.0.0.0',()=>{
+  console.log(`JARVIS ready: http://localhost:${PORT} (demo=${demo})`);
+  // Warm greeting in the background during boot; never delay HTTP readiness.
+  if (voiceConfigured && !demo) void cachedWelcomeAudio().catch(() => {});
+});
