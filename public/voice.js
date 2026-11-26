@@ -47,9 +47,6 @@
   let playingBlocked = false;
   let endAfterAudio = false;
   let pendingAudioId = '';
-  // Only the welcome line is new; microphone and voice gating are from Noise Guard 0.6.
-  let greetingActive = false;
-  let greetingFinished = false;
 
   async function request(url,options={}) {
     const r=await fetch(url,{credentials:'same-origin',cache:'no-store',...options});
@@ -133,75 +130,21 @@
     message=dict[message]||message.replace(/(Bearer|sk-)[a-zA-Z0-9_-]+/g,'[hidden]');
     UI.onError(message.slice(0,140));
   }
-  // The microphone permission is requested DURING the initial sphere tap,
-  // exactly as in Noise Guard 0.6. Recording begins only after the greeting.
-  // No autoplay or microphone request occurs when the PWA page opens.
   async function start(){
     if(!authorized){overlay.hidden=false;return;}
     if(phase!=='idle')return;
     if(!window.isSecureContext){warn(new Error('Нужен HTTPS для микрофона на iPhone'));return;}
     if(!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder){warn(new Error('Браузер не поддерживает запись речи'));return;}
     sessionId=crypto.randomUUID();turnCounter++;
-    const generation=turnCounter;
-    greetingActive=true;
-    greetingFinished=false;
-    endAfterAudio=false;
-    set('speaking','Джарвис на связи');
-    // n8n initialises in parallel. The greeting does NOT wait for it.
+    set('listening','Разрешите доступ к микрофону');
+    // Do not play a greeting: start the n8n session silently to avoid repetition.
     initPromise=request('/api/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'start',session_id:sessionId,text:''})}).catch(err=>{warn(err);return null;});
-    // Critical: call getUserMedia synchronously within the trusted touch.
-    // Do not move this call below await audio.play() or any network request.
-    const micPromise=UI.startMic();
-    // The server already has a prepared, fixed ElevenLabs welcome route
-    // from Fast Welcome 0.7.2. Start playback during the same user gesture.
-    // Normal CRM replies still use the original /api/speech ticket flow.
-    if(!demo){
-      audio.src='/api/welcome-audio?v=0.7.2';
-      const playback=audio.play();
-      // Attach the handler immediately so a rejected autoplay is not unhandled.
-      void playback.catch(err=>{
-        if(generation!==turnCounter || !greetingActive)return;
-        // Failed greeting must not leave the UI indefinitely in 'speaking'.
-        greetingActive=false;
-        greetingFinished=false;
-        stopAudio();
-        set('listening','Не удалось включить приветствие · микрофон готовится');
-        if(activeMic)startRecorder();
-      });
-    } else {
-      // Demo mode cannot synthesise speech; keep its original silent start.
-      greetingFinished=true;
-    }
     try{
-      const stream=await micPromise;
-      if(generation!==turnCounter || phase==='idle'){
-        stream?.getTracks?.().forEach(track=>track.stop());
-        return;
-      }
-      activeMic=stream;
-      if(!greetingActive){
-        if(phase==='listening')startRecorder();
-        return;
-      }
-      if(greetingFinished)finishGreeting();
-    }catch(err){
-      if(generation!==turnCounter)return;
-      warn(err);
-      await end();
-    }
-  }
-  function finishGreeting(){
-    if(!greetingActive)return;
-    greetingFinished=true;
-    if(!activeMic){
-      UI.setDetail('Подключаю микрофон');
-      return;
-    }
-    greetingActive=false;
-    greetingFinished=false;
-    stopAudio();
-    set('listening','Слушаю Вас · касание сферы — отправить');
-    startRecorder();
+      activeMic=await UI.startMic();
+      if(phase!=='listening')return;
+      startRecorder();
+      UI.setDetail('Слушаю Вас · касание сферы — отправить');
+    }catch(err){warn(err);await end();}
   }
   async function submit(manual=false){
     if(phase!=='listening')return;
@@ -249,7 +192,6 @@
     }
   }
   async function afterSpeech(){
-    if(greetingActive){finishGreeting();return;}
     stopAudio();
     if(endAfterAudio){await end();return;}
     set('listening','Слушаю Вас · говорите свободно');
@@ -258,8 +200,6 @@
   audio.addEventListener('ended',()=>{if(phase==='speaking')void afterSpeech();});
   audio.addEventListener('error',()=>{if(phase==='speaking' && !playingBlocked){UI.setDetail('Не удалось воспроизвести голос. Коснитесь сферы для повтора');}});
   function interrupt(){
-    // A short tap may skip the greeting; it never starts recording before the mic is ready.
-    if(greetingActive){finishGreeting();return;}
     // We abort playback immediately and start a new utterance.
     stopAudio();turnCounter++;
     set('listening','Слушаю Вас');
@@ -279,7 +219,6 @@
   }
   async function end(){
     turnCounter++;controller?.abort();controller=null;
-    greetingActive=false;greetingFinished=false;
     stopAudio();disposeRecorder();activeMic=null;
     voiceSince=lastVoiceAt=voicedMs=recentVoiceMs=lastStrongAt=lastMicAt=peakRms=0;
     set('idle');
