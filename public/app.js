@@ -365,7 +365,7 @@
     drawSphere(t,Math.max(peak,smoothLevel));
     lastUpdateMs=timestamp;
   }
-  window.JARVIS_UI = {setState, startMic:startMicrophoneVisualization, ensureMicReady, stopMic, endSession, getState:()=>state, setDetail:v=>{detail.textContent=v}, onError:v=>{title.textContent='Не удалось подключиться';detail.textContent=v}};
+  window.JARVIS_UI = {setTitle:v=>{title.textContent=v;announcement.textContent=v},setState, startMic:startMicrophoneVisualization, ensureMicReady, stopMic, endSession, getState:()=>state, setDetail:v=>{detail.textContent=v}, onError:v=>{title.textContent='Не удалось подключиться';detail.textContent=v}};
   raf=requestAnimationFrame(render);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {

@@ -50,6 +50,9 @@
   let playingBlocked = false;
   let endAfterAudio = false;
   let pendingAudioId = '';
+  let greetingActive = false;
+  let microphoneStarting = false;
+  let blockedWelcomeNeedsTap = false;
 
   async function request(url,options={}) {
     const r=await fetch(url,{credentials:'same-origin',cache:'no-store',...options});
@@ -140,6 +143,37 @@
     message=dict[message]||message.replace(/(Bearer|sk-)[a-zA-Z0-9_-]+/g,'[hidden]');
     UI.onError(message.slice(0,140));
   }
+  // Welcome First 0.7.1: no microphone access, recording or "Слушаю" state
+  // until the greeting has finished. A blocked iOS autoplay stays idle rather
+  // than silently opening the microphone and pretending the voice played.
+  async function openMicAfterGreeting(){
+    if(phase!=='speaking' || microphoneStarting)return;
+    const generation=turnCounter;
+    greetingActive=false;
+    microphoneStarting=true;
+    set('thinking','Включаю микрофон');
+    UI.setTitle?.('Подключаю микрофон');
+    try{
+      activeMic=await UI.startMic();
+      if(generation!==turnCounter || phase!=='thinking'){
+        await UI.stopMic();activeMic=null;return;
+      }
+      if(UI.ensureMicReady && !(await UI.ensureMicReady())){
+        await UI.stopMic();activeMic=null;
+        set('idle','iPhone требует касание сферы для включения микрофона');
+        return;
+      }
+      if(generation!==turnCounter || phase!=='thinking')return;
+      set('listening','Слушаю Вас');
+      startRecorder();
+    }catch(err){
+      if(generation!==turnCounter)return;
+      await UI.stopMic().catch(()=>{});activeMic=null;
+      set('idle','Не удалось включить микрофон · коснитесь сферы');
+    }finally{
+      microphoneStarting=false;
+    }
+  }
   async function start(automatic=false){
     if(!authorized){overlay.hidden=false;return;}
     if(phase!=='idle')return;
@@ -147,38 +181,32 @@
     if(!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder){warn(new Error('Браузер не поддерживает запись речи'));return;}
     restartAfterBackground=false;
     sessionId=crypto.randomUUID();turnCounter++;
+    const generation=turnCounter;
     endAfterAudio=false;
-    set('listening','Подключаю микрофон');
-    // The same existing mode:start starts n8n session. The server only changes
-    // its *spoken* start reply to "Джарвис на связи"; no CRM changes.
-    initPromise=request('/api/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'start',session_id:sessionId,text:''})}).catch(err=>{warn(err);return null;});
+    greetingActive=true;
+    blockedWelcomeNeedsTap=false;
+    // Show the greeting immediately; the server already speaks this phrase via ElevenLabs.
+    set('speaking','Джарвис на связи');
+    UI.setTitle?.('Джарвис на связи');
+    initPromise=request('/api/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'start',session_id:sessionId,text:''})});
     try{
-      activeMic=await UI.startMic();
-      if(phase!=='listening'){
-        try{await UI.stopMic();}catch{}
-        return;
-      }
-      // On some iOS versions the analyser stays suspended until a touch.
-      // Do not pretend we are listening if the input is silent forever.
-      if(UI.ensureMicReady && !(await UI.ensureMicReady())){
-        await UI.stopMic();activeMic=null;
-        set('idle','iPhone требует касание сферы для включения микрофона');
-        return;
-      }
-      if(phase!=='listening')return;
       const hello=await initPromise;
-      if(phase!=='listening')return;
+      if(generation!==turnCounter || phase!=='speaking' || !greetingActive)return;
       if(hello?.speech_ticket){
-        // Record only AFTER the greeting finishes, so JARVIS doesn't hear itself.
         await playTicket(hello.speech_ticket,{introduction:true});
+      }else if(hello?.demo){
+        // Demo has no real audio ticket. Move to listening without recording the greeting.
+        await openMicAfterGreeting();
       }else{
-        set('listening','Джарвис на связи · слушаю Вас');
-        startRecorder();
+        greetingActive=false;
+        set('idle','Не удалось получить приветствие · коснитесь сферы');
       }
     }catch(err){
-      if(phase==='idle')return;
-      warn(err);await end('failure');
-      UI.setDetail(automatic?'Если iPhone заблокировал микрофон — коснитесь сферы':'Проверьте разрешение на микрофон');
+      if(generation!==turnCounter)return;
+      greetingActive=false;
+      await end('failure');
+      warn(err);
+      UI.setDetail(automatic?'Не удалось запустить сеанс · коснитесь сферы для повтора':'Проверьте соединение');
     }
   }
   async function submit(manual=false){
@@ -220,37 +248,73 @@
     stopAudio();pendingAudioId=ticket;
     audio.src='/api/speech/'+encodeURIComponent(ticket);
     set('speaking',introduction?'Джарвис на связи':'Коснитесь сферы, чтобы остановить ответ');
+    if(introduction)UI.setTitle?.('Джарвис на связи');
     try{await audio.play();playingBlocked=false;return true;}
     catch{
       playingBlocked=true;
       if(introduction){
-        // iOS autoplay gate: don't remain stuck in speaking mode.
-        // Start listening if the mic worked; touch remains the fallback.
-        stopAudio();
-        set('listening','Джарвис на связи · слушаю Вас');
-        startRecorder();
+        // iOS may refuse playback without a user gesture. Never start listening
+        // before the greeting, or falsely claim the microphone is active.
+        greetingActive=false;
+        blockedWelcomeNeedsTap=true;
+        // Keep the media URL: a direct tap may be able to play the buffered welcome.
+        set('idle','iPhone заблокировал автозвук · коснитесь сферы для запуска');
       }else UI.setDetail('Коснитесь сферы, чтобы включить звук');
       return false;
     }
   }
   async function afterSpeech(){
+    const wasGreeting=greetingActive;
     stopAudio();
+    if(wasGreeting){await openMicAfterGreeting();return;}
     if(endAfterAudio){await end();return;}
     set('listening','Слушаю Вас · говорите свободно');
     startRecorder();
   }
   audio.addEventListener('ended',()=>{if(phase==='speaking')void afterSpeech();});
-  audio.addEventListener('error',()=>{if(phase==='speaking' && !playingBlocked){UI.setDetail('Не удалось воспроизвести голос. Коснитесь сферы для повтора');}});
+  audio.addEventListener('error',()=>{
+    if(phase!=='speaking' || playingBlocked)return;
+    if(greetingActive){
+      greetingActive=false;
+      stopAudio();
+      set('idle','Не удалось воспроизвести приветствие · коснитесь сферы');
+    }else UI.setDetail('Не удалось воспроизвести голос. Коснитесь сферы для повтора');
+  });
   function interrupt(){
-    // We abort playback immediately and start a new utterance.
+    const wasGreeting=greetingActive;
+    // Touch interrupts the greeting or any following answer immediately.
     stopAudio();turnCounter++;
+    if(wasGreeting){
+      void openMicAfterGreeting();
+      return;
+    }
     set('listening','Слушаю Вас');
     startRecorder();
   }
   async function tap(){
+    if(phase==='idle' && blockedWelcomeNeedsTap){
+      // A direct gesture can unlock audio.play() on iPhone. Retry the
+      // original greeting without recreating the n8n session.
+      blockedWelcomeNeedsTap=false;
+      greetingActive=true;
+      set('speaking','Джарвис на связи');
+      UI.setTitle?.('Джарвис на связи');
+      try{
+        await audio.play();
+        playingBlocked=false;
+      }catch{
+        // If audio remains unavailable, at least allow manual mic startup.
+        greetingActive=false;
+        stopAudio();
+        set('speaking','Подключаю микрофон');
+        await openMicAfterGreeting();
+      }
+      return;
+    }
     if(phase==='idle')return start();
     if(phase==='listening')return submit(true);
     if(phase==='thinking'){
+      if(microphoneStarting)return;
       turnCounter++;controller?.abort();controller=null;
       set('listening','Слушаю Вас');startRecorder();return;
     }
@@ -262,6 +326,7 @@
   async function end(reason='manual'){
     restartAfterBackground=reason==='background';
     turnCounter++;controller?.abort();controller=null;
+    greetingActive=false;blockedWelcomeNeedsTap=false;
     stopAudio();disposeRecorder();activeMic=null;endAfterAudio=false;
     voiceSince=lastVoiceAt=voicedMs=recentVoiceMs=lastStrongAt=lastMicAt=peakRms=0;
     set('idle');
