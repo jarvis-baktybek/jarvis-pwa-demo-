@@ -85,6 +85,20 @@
     void stopMic();
   }
 
+  // Unlock the audio analyzer on the same gesture that starts the greeting.
+  // No getUserMedia / recording occurs here: microphone starts after greeting.
+  function prepareMicAudio(){
+    if(audioContext) {
+      if(audioContext.state === 'suspended') void audioContext.resume().catch(()=>{});
+      return;
+    }
+    const Audio=window.AudioContext||window.webkitAudioContext;
+    if(!Audio)return;
+    try{
+      audioContext=new Audio();
+      if(audioContext.state === 'suspended') void audioContext.resume().catch(()=>{});
+    }catch{audioContext=null;}
+  }
   async function startMicrophoneVisualization() {
     if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext) {
       // file:// preview still renders and cycles by tapping the sphere.
@@ -94,10 +108,8 @@
       // Create/resume the analyser before the first await. On a manual tap,
       // Safari's short-lived user activation can otherwise expire at the permission prompt.
       const Audio = window.AudioContext || window.webkitAudioContext;
-      if (Audio) {
-        audioContext = new Audio();
-        if (audioContext.state === 'suspended') void audioContext.resume().catch(() => {});
-      }
+      if (Audio && !audioContext) audioContext = new Audio();
+      if (audioContext?.state === 'suspended') void audioContext.resume().catch(() => {});
       const stream = await navigator.mediaDevices.getUserMedia({audio: {
         echoCancellation: true, noiseSuppression: true, autoGainControl: true
       }, video: false});
@@ -365,7 +377,7 @@
     drawSphere(t,Math.max(peak,smoothLevel));
     lastUpdateMs=timestamp;
   }
-  window.JARVIS_UI = {setTitle:v=>{title.textContent=v;announcement.textContent=v},setState, startMic:startMicrophoneVisualization, ensureMicReady, stopMic, endSession, getState:()=>state, setDetail:v=>{detail.textContent=v}, onError:v=>{title.textContent='Не удалось подключиться';detail.textContent=v}};
+  window.JARVIS_UI = {setTitle:v=>{title.textContent=v;announcement.textContent=v},setState, prepareMicAudio, startMic:startMicrophoneVisualization, ensureMicReady, stopMic, endSession, getState:()=>state, setDetail:v=>{detail.textContent=v}, onError:v=>{title.textContent='Не удалось подключиться';detail.textContent=v}};
   raf=requestAnimationFrame(render);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {

@@ -24,9 +24,8 @@
   const ONSET_GAP_MS = 230;
   const MANUAL_VOICE_MS = 110;
 
-  // AutoWake 0.7: one attempt on foreground launch, never after deliberate long-press stop.
-  let launchAttempted = false;
-  let restartAfterBackground = false;
+  // Tap Start 0.7.3: explicit gesture starts speech, not page load.
+  // iPhone blocks unprompted autoplay, so never try to play on launch.
   let authorized = false;
   let demo = false;
   let phase = 'idle';
@@ -64,7 +63,7 @@
   }
   async function status(){try{
       const d=await request('/api/status');authorized=d.authorized;demo=d.demo;
-      if(!authorized){overlay.hidden=false;}else{overlay.hidden=true;autoStartAtLaunch();}
+      if(!authorized){overlay.hidden=false;}else{overlay.hidden=true;set('idle','Коснитесь сферы, чтобы запустить Джарвиса');}
       if(!d.ready && !demo)UI.setDetail('Сначала настройте сервер: ключи OpenAI, n8n и ElevenLabs');
     }catch{UI.setDetail('Подключитесь к серверу JARVIS через HTTPS');}
   }
@@ -74,16 +73,9 @@
     try{
       await request('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:pin.value})});
       pin.value='';authorized=true;overlay.hidden=true;
-      UI.setDetail('Запускаю голосовой режим');
-      autoStartAtLaunch();
+      set('idle','Коснитесь сферы, чтобы запустить Джарвиса');
     }catch(err){authError.textContent=err.message==='wrong_code'?'Неверный код доступа':'Не удалось войти: '+err.message;}
   });
-  function autoStartAtLaunch(){
-    if(!authorized || launchAttempted)return;
-    if(document.hidden){restartAfterBackground=true;return;}
-    launchAttempted=true;
-    if(phase==='idle')void start(true);
-  }
   void status();
 
   function set(next,detail=''){
@@ -145,7 +137,7 @@
     message=dict[message]||message.replace(/(Bearer|sk-)[a-zA-Z0-9_-]+/g,'[hidden]');
     UI.onError(message.slice(0,140));
   }
-  // Welcome First 0.7.1: no microphone access, recording or "Слушаю" state
+  // Tap Start 0.7.3: no microphone access, recording or "Слушаю" state
   // until the greeting has finished. A blocked iOS autoplay stays idle rather
   // than silently opening the microphone and pretending the voice played.
   async function openMicAfterGreeting(){
@@ -176,18 +168,20 @@
       microphoneStarting=false;
     }
   }
-  async function start(automatic=false){
+  async function start(){
     if(!authorized){overlay.hidden=false;return;}
     if(phase!=='idle')return;
     if(!window.isSecureContext){warn(new Error('Нужен HTTPS для микрофона на iPhone'));return;}
     if(!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder){warn(new Error('Браузер не поддерживает запись речи'));return;}
-    restartAfterBackground=false;
+    // Prime the analyzer's AudioContext inside the user's tap gesture.
+    // This does NOT capture any microphone audio before the greeting.
+    UI.prepareMicAudio?.();
     sessionId=crypto.randomUUID();turnCounter++;
     const generation=turnCounter;
     endAfterAudio=false;
     greetingActive=true;
     blockedWelcomeNeedsTap=false;
-    // Show the greeting immediately; the server already speaks this phrase via ElevenLabs.
+    // A manual tap launches the fixed, pre-generated ElevenLabs greeting first.
     set('speaking','Джарвис на связи');
     UI.setTitle?.('Джарвис на связи');
     // Initialize n8n concurrently with the greeting, not before playback.
@@ -216,7 +210,7 @@
           playingBlocked=true;
           blockedWelcomeNeedsTap=true;
           greetingActive=false;
-          set('idle','iPhone заблокировал автозвук · коснитесь сферы');
+          set('idle','Не удалось включить приветствие · коснитесь сферы ещё раз');
           return;
         }
         // Offline, old server, or unsupported response: use the previous
@@ -238,7 +232,7 @@
       greetingActive=false;
       await end('failure');
       warn(err);
-      UI.setDetail(automatic?'Не удалось запустить сеанс · коснитесь сферы для повтора':'Проверьте соединение');
+      UI.setDetail('Не удалось запустить сеанс · коснитесь сферы для повтора');
     }
   }
   async function submit(manual=false){
@@ -290,7 +284,7 @@
         greetingActive=false;
         blockedWelcomeNeedsTap=true;
         // Keep the media URL: a direct tap may be able to play the buffered welcome.
-        set('idle','iPhone заблокировал автозвук · коснитесь сферы для запуска');
+        set('idle','Не удалось включить звук · коснитесь сферы ещё раз');
       }else UI.setDetail('Коснитесь сферы, чтобы включить звук');
       return false;
     }
@@ -337,11 +331,11 @@
         await audio.play();
         playingBlocked=false;
       }catch{
-        // If audio remains unavailable, at least allow manual mic startup.
+        // Do not start listening silently: the user explicitly requested
+        // "Джарвис на связи" before any microphone capture.
         greetingActive=false;
-        stopAudio();
-        set('speaking','Подключаю микрофон');
-        await openMicAfterGreeting();
+        blockedWelcomeNeedsTap=true;
+        set('idle','Не удалось воспроизвести приветствие · проверьте звук');
       }
       return;
     }
@@ -358,7 +352,6 @@
     }
   }
   async function end(reason='manual'){
-    restartAfterBackground=reason==='background';
     turnCounter++;controller?.abort();controller=null;
     greetingActive=false;blockedWelcomeNeedsTap=false;
     stopAudio();disposeRecorder();activeMic=null;endAfterAudio=false;
@@ -404,11 +397,9 @@
     // Touching the sphere still stops playback immediately and opens the mic.
   }
   function onVisible(){
-    if(restartAfterBackground && authorized && phase==='idle'){
-      restartAfterBackground=false;
-      launchAttempted=true;
-      void start(true);
-    }else autoStartAtLaunch();
+    // PWA opening or returning to foreground never starts the microphone or speech.
+    if(authorized && phase==='idle' && !blockedWelcomeNeedsTap)
+      UI.setDetail('Коснитесь сферы, чтобы запустить Джарвиса');
   }
   window.jarvisController={tap,end,onMicLevel,onVisible};
 })();
