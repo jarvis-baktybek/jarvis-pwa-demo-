@@ -38,7 +38,7 @@
   window.addEventListener('resize', rescale, {passive: true});
 
   const copy = {
-    idle: ['JARVIS', 'Готов к запуску'],
+    idle: ['Нажмите на сферу', 'Чтобы начать разговор'],
     listening: ['Слушаю Вас', 'Говорите свободно · после паузы отвечу'],
     thinking: ['Обрабатываю запрос', 'Получаю ответ'],
     speaking: ['Джарвис отвечает', 'Коснитесь сферы, чтобы остановить']
@@ -79,37 +79,19 @@
       try { await old.close(); } catch (_) { /* the demo must continue */ }
     }
   }
-  function endSession(reason='manual') {
-    if (window.jarvisController) void window.jarvisController.end(reason);
+  function endSession() {
+    if (window.jarvisController) void window.jarvisController.end();
     setState('idle');
     void stopMic();
   }
 
-  // Unlock the audio analyzer on the same gesture that starts the greeting.
-  // No getUserMedia / recording occurs here: microphone starts after greeting.
-  function prepareMicAudio(){
-    if(audioContext) {
-      if(audioContext.state === 'suspended') void audioContext.resume().catch(()=>{});
-      return;
-    }
-    const Audio=window.AudioContext||window.webkitAudioContext;
-    if(!Audio)return;
-    try{
-      audioContext=new Audio();
-      if(audioContext.state === 'suspended') void audioContext.resume().catch(()=>{});
-    }catch{audioContext=null;}
-  }
   async function startMicrophoneVisualization() {
     if (!navigator.mediaDevices?.getUserMedia || !window.isSecureContext) {
       // file:// preview still renders and cycles by tapping the sphere.
       throw new Error('Для микрофона необходимо HTTPS и разрешение браузера.');
     }
     try {
-      // Create/resume the analyser before the first await. On a manual tap,
-      // Safari's short-lived user activation can otherwise expire at the permission prompt.
-      const Audio = window.AudioContext || window.webkitAudioContext;
-      if (Audio && !audioContext) audioContext = new Audio();
-      if (audioContext?.state === 'suspended') void audioContext.resume().catch(() => {});
+      // iOS requires the first interaction to initiate microphone permission.
       const stream = await navigator.mediaDevices.getUserMedia({audio: {
         echoCancellation: true, noiseSuppression: true, autoGainControl: true
       }, video: false});
@@ -118,7 +100,9 @@
         throw new Error('Сессия завершена.');
       }
       micStream = stream;
-      if (!audioContext) return stream;
+      const Audio = window.AudioContext || window.webkitAudioContext;
+      if (!Audio) return;
+      audioContext = new Audio();
       if (audioContext.state === 'suspended') void audioContext.resume().catch(() => {});
       const source = audioContext.createMediaStreamSource(stream);
       analyzer = audioContext.createAnalyser();
@@ -135,20 +119,8 @@
       if (state === 'listening') detail.textContent = 'Говорите свободно · после паузы отвечу';
       return stream;
     } catch (error) {
-      await stopMic();
       throw error;
     }
-  }
-  async function ensureMicReady(){
-    if (!audioContext) return Boolean(micStream?.active);
-    if (audioContext.state==='running')return true;
-    try {
-      await Promise.race([
-        audioContext.resume().catch(()=>{}),
-        new Promise(resolve=>setTimeout(resolve,900))
-      ]);
-    }catch{}
-    return audioContext.state==='running';
   }
 
   function onPointerDown(event) {
@@ -377,18 +349,15 @@
     drawSphere(t,Math.max(peak,smoothLevel));
     lastUpdateMs=timestamp;
   }
-  window.JARVIS_UI = {setTitle:v=>{title.textContent=v;announcement.textContent=v},setState, prepareMicAudio, startMic:startMicrophoneVisualization, ensureMicReady, stopMic, endSession, getState:()=>state, setDetail:v=>{detail.textContent=v}, onError:v=>{title.textContent='Не удалось подключиться';detail.textContent=v}};
+  window.JARVIS_UI = {setState, startMic:startMicrophoneVisualization, stopMic, endSession, getState:()=>state, setDetail:v=>{detail.textContent=v}, onError:v=>{title.textContent='Не удалось подключиться';detail.textContent=v}};
   raf=requestAnimationFrame(render);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       if (raf) cancelAnimationFrame(raf);
       raf=0;
       // The visual demo should not keep a microphone active when not visible.
-      endSession('background');
-    } else {
-      if (!raf) raf=requestAnimationFrame(render);
-      window.jarvisController?.onVisible?.();
-    }
+      endSession();
+    } else if (!raf) raf=requestAnimationFrame(render);
   });
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
     window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
