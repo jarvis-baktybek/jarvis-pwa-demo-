@@ -349,7 +349,14 @@
     drawSphere(t,Math.max(peak,smoothLevel));
     lastUpdateMs=timestamp;
   }
-  window.JARVIS_UI = {setState, startMic:startMicrophoneVisualization, stopMic, endSession, getState:()=>state, setDetail:v=>{detail.textContent=v}, onError:v=>{title.textContent='Не удалось подключиться';detail.textContent=v}};
+  // iOS may suspend its WebAudio analyser while the welcome clip plays.
+  // Resume the existing context; never open a new microphone permission prompt.
+  async function resumeMicContext(){
+    if(audioContext?.state==='suspended'){
+      try{await audioContext.resume();}catch{}
+    }
+  }
+  window.JARVIS_UI = {setState, startMic:startMicrophoneVisualization, resumeMicContext, stopMic, endSession, getState:()=>state, setDetail:v=>{detail.textContent=v}, onError:v=>{title.textContent='Не удалось подключиться';detail.textContent=v}};
   raf=requestAnimationFrame(render);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {

@@ -47,6 +47,9 @@
   let playingBlocked = false;
   let endAfterAudio = false;
   let pendingAudioId = '';
+  // Welcome is presentation-only: the proven 0.6 microphone/session path stays intact.
+  let welcomeActive = false;
+  let welcomeTimer = null;
 
   async function request(url,options={}) {
     const r=await fetch(url,{credentials:'same-origin',cache:'no-store',...options});
@@ -136,15 +139,51 @@
     if(!window.isSecureContext){warn(new Error('Нужен HTTPS для микрофона на iPhone'));return;}
     if(!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder){warn(new Error('Браузер не поддерживает запись речи'));return;}
     sessionId=crypto.randomUUID();turnCounter++;
+    const generation=turnCounter;
     set('listening','Разрешите доступ к микрофону');
-    // Do not play a greeting: start the n8n session silently to avoid repetition.
+    // This is the original Noise Guard 0.6 session initialization.
     initPromise=request('/api/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'start',session_id:sessionId,text:''})}).catch(err=>{warn(err);return null;});
+    // Critical iPhone behaviour: request the microphone directly from the tap,
+    // as in the proven 0.6 release. Recording begins as soon as it is ready.
+    const micPromise=UI.startMic();
+    // Welcome uses the existing cached ElevenLabs endpoint. Failure or a missed
+    // 'ended' event MUST NOT prevent normal 0.6 voice recognition.
+    if(!demo){
+      welcomeActive=true;
+      set('speaking','Джарвис на связи');
+      audio.src='/api/welcome-audio';
+      welcomeTimer=setTimeout(()=>{if(generation===turnCounter)finishWelcome()},6500);
+      try{
+        const playing=audio.play();
+        if(playing?.catch)void playing.catch(()=>{if(generation===turnCounter)finishWelcome()});
+      }catch{finishWelcome();}
+    }
     try{
-      activeMic=await UI.startMic();
-      if(phase!=='listening')return;
+      activeMic=await micPromise;
+      if(generation!==turnCounter || phase==='idle')return;
+      // Keep the original 0.6 MediaRecorder start behaviour. During the short
+      // greeting onMicLevel is gated by phase='speaking', so no echo is sent.
       startRecorder();
-      UI.setDetail('Слушаю Вас · касание сферы — отправить');
-    }catch(err){warn(err);await end();}
+      if(!welcomeActive)UI.setDetail('Слушаю Вас · касание сферы — отправить');
+    }catch(err){
+      if(generation!==turnCounter)return;
+      warn(err);await end();
+    }
+  }
+  function finishWelcome(){
+    if(!welcomeActive)return;
+    welcomeActive=false;
+    if(welcomeTimer!==null){clearTimeout(welcomeTimer);welcomeTimer=null;}
+    stopAudio();
+    if(phase==='idle')return;
+    // Discard any audio captured while the assistant spoke, without stopping
+    // the microphone stream or requesting permission a second time.
+    disposeRecorder();
+    set('listening','Слушаю Вас · говорите свободно');
+    if(activeMic){
+      startRecorder();
+      void UI.resumeMicContext?.();
+    }
   }
   async function submit(manual=false){
     if(phase!=='listening')return;
@@ -197,8 +236,8 @@
     set('listening','Слушаю Вас · говорите свободно');
     startRecorder();
   }
-  audio.addEventListener('ended',()=>{if(phase==='speaking')void afterSpeech();});
-  audio.addEventListener('error',()=>{if(phase==='speaking' && !playingBlocked){UI.setDetail('Не удалось воспроизвести голос. Коснитесь сферы для повтора');}});
+  audio.addEventListener('ended',()=>{if(welcomeActive){finishWelcome();return;}if(phase==='speaking')void afterSpeech();});
+  audio.addEventListener('error',()=>{if(welcomeActive){finishWelcome();return;}if(phase==='speaking' && !playingBlocked){UI.setDetail('Не удалось воспроизвести голос. Коснитесь сферы для повтора');}});
   function interrupt(){
     // We abort playback immediately and start a new utterance.
     stopAudio();turnCounter++;
@@ -207,6 +246,7 @@
   }
   async function tap(){
     if(phase==='idle')return start();
+    if(welcomeActive){finishWelcome();return;}
     if(phase==='listening')return submit(true);
     if(phase==='thinking'){
       turnCounter++;controller?.abort();controller=null;
@@ -219,6 +259,8 @@
   }
   async function end(){
     turnCounter++;controller?.abort();controller=null;
+    welcomeActive=false;
+    if(welcomeTimer!==null){clearTimeout(welcomeTimer);welcomeTimer=null;}
     stopAudio();disposeRecorder();activeMic=null;
     voiceSince=lastVoiceAt=voicedMs=recentVoiceMs=lastStrongAt=lastMicAt=peakRms=0;
     set('idle');
