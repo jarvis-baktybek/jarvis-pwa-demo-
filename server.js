@@ -149,9 +149,12 @@ async function handle(req,res){
    const message=String(b.text||'').trim().slice(0,2000);
    if(mode==='ask'&&!message)return fail(res,400,'empty_text');
    const data=await callN8n({mode,device_id:'my-iphone',session_id:sid,text:message});
+   // Start greeting is a fixed UI phrase, not an AI-generated CRM answer.
+   // Only the speech text is overridden; n8n session initialization is unchanged.
+   const spokenText=mode==='start'?'Джарвис на связи.':data.speak;
    let ticket=null;
-   if(!demo && typeof data.speak==='string'&&data.speak.trim() && voiceConfigured){
-     ticket=token(); tickets.set(ticket,{text:data.speak.trim().slice(0,1800),language:['ru','ky','en'].includes(data.language)?data.language:'ru',sid:auth.id,expires:now()+60_000});
+   if(!demo && typeof spokenText==='string'&&spokenText.trim() && voiceConfigured){
+     ticket=token(); tickets.set(ticket,{text:spokenText.trim().slice(0,1800),language:mode==='start'?'ru':(['ru','ky','en'].includes(data.language)?data.language:'ru'),sid:auth.id,expires:now()+60_000});
    }
    // Do NOT expose any CRM payload, account identifiers or spoken transcript in response.
    return send(res,200,{ok:true,speech_ticket:ticket,end_session:data.end_session===true,requires_confirmation:data.requires_confirmation===true,has_speech:typeof data.speak==='string'&&!!data.speak.trim(),demo});

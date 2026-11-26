@@ -24,6 +24,9 @@
   const ONSET_GAP_MS = 230;
   const MANUAL_VOICE_MS = 110;
 
+  // AutoWake 0.7: one attempt on foreground launch, never after deliberate long-press stop.
+  let launchAttempted = false;
+  let restartAfterBackground = false;
   let authorized = false;
   let demo = false;
   let phase = 'idle';
@@ -56,7 +59,7 @@
   }
   async function status(){try{
       const d=await request('/api/status');authorized=d.authorized;demo=d.demo;
-      if(!authorized){overlay.hidden=false;}else{overlay.hidden=true;}
+      if(!authorized){overlay.hidden=false;}else{overlay.hidden=true;autoStartAtLaunch();}
       if(!d.ready && !demo)UI.setDetail('Сначала настройте сервер: ключи OpenAI, n8n и ElevenLabs');
     }catch{UI.setDetail('Подключитесь к серверу JARVIS через HTTPS');}
   }
@@ -66,9 +69,16 @@
     try{
       await request('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:pin.value})});
       pin.value='';authorized=true;overlay.hidden=true;
-      UI.setDetail('Коснитесь сферы, чтобы начать разговор');
+      UI.setDetail('Запускаю голосовой режим');
+      autoStartAtLaunch();
     }catch(err){authError.textContent=err.message==='wrong_code'?'Неверный код доступа':'Не удалось войти: '+err.message;}
   });
+  function autoStartAtLaunch(){
+    if(!authorized || launchAttempted)return;
+    if(document.hidden){restartAfterBackground=true;return;}
+    launchAttempted=true;
+    if(phase==='idle')void start(true);
+  }
   void status();
 
   function set(next,detail=''){
@@ -130,21 +140,46 @@
     message=dict[message]||message.replace(/(Bearer|sk-)[a-zA-Z0-9_-]+/g,'[hidden]');
     UI.onError(message.slice(0,140));
   }
-  async function start(){
+  async function start(automatic=false){
     if(!authorized){overlay.hidden=false;return;}
     if(phase!=='idle')return;
     if(!window.isSecureContext){warn(new Error('Нужен HTTPS для микрофона на iPhone'));return;}
     if(!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder){warn(new Error('Браузер не поддерживает запись речи'));return;}
+    restartAfterBackground=false;
     sessionId=crypto.randomUUID();turnCounter++;
-    set('listening','Разрешите доступ к микрофону');
-    // Do not play a greeting: start the n8n session silently to avoid repetition.
+    endAfterAudio=false;
+    set('listening','Подключаю микрофон');
+    // The same existing mode:start starts n8n session. The server only changes
+    // its *spoken* start reply to "Джарвис на связи"; no CRM changes.
     initPromise=request('/api/turn',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:'start',session_id:sessionId,text:''})}).catch(err=>{warn(err);return null;});
     try{
       activeMic=await UI.startMic();
+      if(phase!=='listening'){
+        try{await UI.stopMic();}catch{}
+        return;
+      }
+      // On some iOS versions the analyser stays suspended until a touch.
+      // Do not pretend we are listening if the input is silent forever.
+      if(UI.ensureMicReady && !(await UI.ensureMicReady())){
+        await UI.stopMic();activeMic=null;
+        set('idle','iPhone требует касание сферы для включения микрофона');
+        return;
+      }
       if(phase!=='listening')return;
-      startRecorder();
-      UI.setDetail('Слушаю Вас · касание сферы — отправить');
-    }catch(err){warn(err);await end();}
+      const hello=await initPromise;
+      if(phase!=='listening')return;
+      if(hello?.speech_ticket){
+        // Record only AFTER the greeting finishes, so JARVIS doesn't hear itself.
+        await playTicket(hello.speech_ticket,{introduction:true});
+      }else{
+        set('listening','Джарвис на связи · слушаю Вас');
+        startRecorder();
+      }
+    }catch(err){
+      if(phase==='idle')return;
+      warn(err);await end('failure');
+      UI.setDetail(automatic?'Если iPhone заблокировал микрофон — коснитесь сферы':'Проверьте разрешение на микрофон');
+    }
   }
   async function submit(manual=false){
     if(phase!=='listening')return;
@@ -181,14 +216,21 @@
       warn(err);set('listening','Повторите запрос или проверьте соединение');startRecorder();
     }
   }
-  async function playTicket(ticket){
+  async function playTicket(ticket,{introduction=false}={}){
     stopAudio();pendingAudioId=ticket;
     audio.src='/api/speech/'+encodeURIComponent(ticket);
-    set('speaking','Коснитесь сферы, чтобы остановить ответ');
-    try{await audio.play();playingBlocked=false;}
+    set('speaking',introduction?'Джарвис на связи':'Коснитесь сферы, чтобы остановить ответ');
+    try{await audio.play();playingBlocked=false;return true;}
     catch{
       playingBlocked=true;
-      UI.setDetail('Коснитесь сферы, чтобы включить звук');
+      if(introduction){
+        // iOS autoplay gate: don't remain stuck in speaking mode.
+        // Start listening if the mic worked; touch remains the fallback.
+        stopAudio();
+        set('listening','Джарвис на связи · слушаю Вас');
+        startRecorder();
+      }else UI.setDetail('Коснитесь сферы, чтобы включить звук');
+      return false;
     }
   }
   async function afterSpeech(){
@@ -217,9 +259,10 @@
       interrupt();
     }
   }
-  async function end(){
+  async function end(reason='manual'){
+    restartAfterBackground=reason==='background';
     turnCounter++;controller?.abort();controller=null;
-    stopAudio();disposeRecorder();activeMic=null;
+    stopAudio();disposeRecorder();activeMic=null;endAfterAudio=false;
     voiceSince=lastVoiceAt=voicedMs=recentVoiceMs=lastStrongAt=lastMicAt=peakRms=0;
     set('idle');
     try{await UI.stopMic();}catch{}
@@ -261,5 +304,12 @@
     // loud background sounds and the assistant's own speaker cause false barge-ins.
     // Touching the sphere still stops playback immediately and opens the mic.
   }
-  window.jarvisController={tap,end,onMicLevel};
+  function onVisible(){
+    if(restartAfterBackground && authorized && phase==='idle'){
+      restartAfterBackground=false;
+      launchAttempted=true;
+      void start(true);
+    }else autoStartAtLaunch();
+  }
+  window.jarvisController={tap,end,onMicLevel,onVisible};
 })();
